@@ -1,0 +1,55 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add EC2 host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p ${{ secrets.EC2_PORT }} ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Install rsync
+        run: sudo apt-get update && sudo apt-get install -y rsync
+
+      - name: Sync files to EC2 (exclude node_modules & .env)
+        env:
+          SSH_KEY: ${{ secrets.EC2_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+          PORT: ${{ secrets.EC2_PORT }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+        run: |
+          echo "$SSH_KEY" > key.pem
+          chmod 600 key.pem
+          rsync -avz --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "node_modules" \
+            --exclude ".env" \
+            -e "ssh -i key.pem -p $PORT" \
+            ./ $USER@$HOST:$APP_DIR/
+
+      - name: Install deps & restart PM2 on EC2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          port: ${{ secrets.EC2_PORT }}
+          key: ${{ secrets.EC2_KEY }}
+          script: |
+            cd ${{ secrets.APP_DIR }}
+            if [ ! -f .env ]; then echo "⚠️ .env missing on server"; exit 1; fi
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            pm2 describe ${{ secrets.APP_NAME }} >/dev/null 2>&1 \
+              && pm2 restart ${{ secrets.APP_NAME }} \
+              || pm2 start npm --name "${{ secrets.APP_NAME }}" -- run start
+            pm2 save
